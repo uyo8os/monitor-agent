@@ -8,7 +8,7 @@ on:
       version:
         description: "Stable version tag (vX.Y.Z)"
         required: true
-        default: "v1.2.4"
+        default: "v1.2.5"
         type: string
 
 # Read-only by default: the build jobs run third-party actions, dependency
