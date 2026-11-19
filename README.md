@@ -81,7 +81,14 @@ cargo test
 cargo clippy --all-targets
 ```
 
-发布产物为 musl 静态链接二进制，推送 `v*` tag 由 `.github/workflows/release.yml` 构建。
+发布产物为 musl 静态链接二进制。先将 `Cargo.toml` 中的版本改为要发布的版本，执行 `cargo update --workspace` 更新 `Cargo.lock`，并将 `.github/workflows/release.yml` 中 `workflow_dispatch.inputs.version.default` 同步改成对应标签，然后提交并推送这些文件。版本标签必须是 `v数字.数字.数字`，并与 `Cargo.toml` 一致（如 `1.2.5` 对应 `v1.2.5`）。
+
+发布有两种方式：
+
+1. 在要发布的提交上推送版本标签，例如 `git tag v1.2.5`，再执行 `git push origin v1.2.5`。
+2. 在 GitHub 的 Actions 页面选择 **Publish release**，点击 **Run workflow** 并选择分支。版本输入框显示工作流中配置的默认值，确认它与所选分支的 `Cargo.toml` 版本一致后运行。
+
+两种方式都会先检查格式、运行测试并构建两个架构，再签名并发布最新 Release。手动发布时，未存在的标签会指向所选提交；已有标签若指向其他提交则会失败，不会移动。Release 已存在时也会失败。普通推送 `main` 不会触发发布。
 
 发布前，在 GitHub Actions secrets 中配置 Ed25519 私钥 `AGENT_SIGNING_KEY`。使用新密钥时，先将对应公钥同步到本仓库 `.github/workflows/release.yml` 和 Hub 仓库 `src/main.rs`，并更新 Hub；否则发布校验或 Hub 的签名校验会失败。私钥不得提交到仓库。发布时需包含各架构二进制、签名和校验文件。
 

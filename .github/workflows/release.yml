@@ -1,9 +1,15 @@
-name: release
+name: Publish release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable version tag (vX.Y.Z)"
+        required: true
+        default: "v1.2.4"
+        type: string
 
 # Read-only by default: the build jobs run third-party actions, dependency
 # build scripts and install hooks, none of which may hold a token that can
@@ -11,20 +17,49 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate version
+        id: version
+        env:
+          REQUESTED_TAG: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          V=v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            TAG="$REQUESTED_TAG"
+          else
+            TAG=$REF_NAME
+          fi
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Version must be vMAJOR.MINOR.PATCH"; exit 1; }
+          [ "$TAG" = "$V" ] || { echo "::error::Version $TAG must match Cargo.toml ($V); update Cargo.toml and Cargo.lock first"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
   build:
+    needs: check
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
       - uses: actions/checkout@v7
-      # A v* tag can be neither moved nor deleted, so one that disagrees with the
-      # version the agent reports stops here, before anything is published.
-      - if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          V=v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
-          [ "$GITHUB_REF_NAME" = "$V" ] || { echo "::error::tag $GITHUB_REF_NAME, Cargo.toml $V"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -39,11 +74,12 @@ jobs:
           path: monitor-agent-${{ matrix.target }}
 
   release:
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
@@ -52,7 +88,7 @@ jobs:
       # signature that verifies under the public key built into it. The private
       # key reaches this job alone. Checked against that same public key here, so
       # a secret holding any other key fails the release instead of publishing
-      # binaries no hub will relay. Runs on a manual dispatch too.
+      # binaries no hub will relay.
       - run: |
           [ -n "$AGENT_SIGNING_KEY" ] || { echo "::error::the AGENT_SIGNING_KEY secret is not set"; exit 1; }
           umask 077
@@ -70,16 +106,30 @@ jobs:
             -----BEGIN PUBLIC KEY-----
             MCowBQYDK2VwAyEAR77wPOW0ypifIU726OTvvi4Tm/XQSUuBAC+VbnIFgj8=
             -----END PUBLIC KEY-----
-      # A manual dispatch builds and signs the binaries; only a tag publishes,
-      # so the path can be exercised without cutting a release. gh ships on the
-      # runner, keeping a third-party action out of the contents:write step.
-      # sha256sums.txt is generated inside bin/, so the names in it are bare; the
-      # `*-musl` glob keeps the signatures beside the binaries out of it.
-      - if: startsWith(github.ref, 'refs/tags/')
+      # Never move a tag. The selected commit is the one checked and built,
+      # even if the selected branch has moved since the run started.
+      - name: Create or verify tag
+        run: |
+          if git ls-remote --exit-code --refs origin "refs/tags/$TAG" >/dev/null; then
+            git fetch --no-tags origin "refs/tags/$TAG"
+            ACTUAL=$(git rev-parse 'FETCH_HEAD^{commit}')
+            [ "$ACTUAL" = "$GITHUB_SHA" ] || { echo "::error::Tag $TAG points to a different commit; it will not be moved"; exit 1; }
+          else
+            STATUS=$?
+            [ "$STATUS" = 2 ] || { echo "::error::Could not check the remote tag"; exit "$STATUS"; }
+            [ "$EVENT_NAME" = workflow_dispatch ] || { echo "::error::Tag $TAG is missing"; exit 1; }
+            git push origin "$GITHUB_SHA:refs/tags/$TAG"
+          fi
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+      # sha256sums.txt has bare asset names; the glob excludes signatures.
+      - name: Publish GitHub release
         run: |
           mkdir -p bin && mv monitor-agent-* bin/
           (cd bin && sha256sum monitor-agent-*-musl > sha256sums.txt)
-          gh release create "$GITHUB_REF_NAME" bin/monitor-agent-* bin/sha256sums.txt \
-            --generate-notes --repo "$GITHUB_REPOSITORY"
+          gh release create "$TAG" bin/monitor-agent-* bin/sha256sums.txt \
+            --verify-tag --generate-notes --latest --repo "$GITHUB_REPOSITORY"
         env:
+          TAG: ${{ needs.check.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
