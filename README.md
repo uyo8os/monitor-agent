@@ -1,6 +1,6 @@
 # monitor-agent
 
-[monitor](https://github.com/monitor-probe/monitor) 的 Linux agent。采集本机指标，经 WebSocket 上报 hub。
+[monitor](https://github.com/uyo8os/monitor) 的 Linux agent。采集本机指标，经 WebSocket 上报 hub。
 
 静态链接单文件，无运行时依赖，常驻内存数 MB。
 
@@ -82,6 +82,8 @@ cargo clippy --all-targets
 ```
 
 发布产物为 musl 静态链接二进制，推送 `v*` tag 由 `.github/workflows/release.yml` 构建。
+
+发布前，在 GitHub Actions secrets 中配置 Ed25519 私钥 `AGENT_SIGNING_KEY`。使用新密钥时，先将对应公钥同步到本仓库 `.github/workflows/release.yml` 和 Hub 仓库 `src/main.rs`，并更新 Hub；否则发布校验或 Hub 的签名校验会失败。私钥不得提交到仓库。发布时需包含各架构二进制、签名和校验文件。
 
 ## 许可
 
